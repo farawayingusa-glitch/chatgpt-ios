@@ -1,0 +1,45 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build unsigned app
+        run: |
+          xcodebuild -project ChatGPT.xcodeproj \
+            -scheme ChatGPT \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package IPA (ad-hoc signed for TrollStore)
+        run: |
+          APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/ChatGPT.app"
+          test -d "$APP_PATH"
+          mkdir -p Payload
+          cp -r "$APP_PATH" Payload/
+          /usr/bin/codesign --force --deep --sign - Payload/ChatGPT.app
+          zip -qr ChatGPT.ipa Payload
+          ls -lh ChatGPT.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChatGPT-ipa
+          path: ChatGPT.ipa
+          retention-days: 30
