@@ -46,6 +46,23 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
         webView.reload()
     }
 
+    // 登录授权流程涉及的域名，必须留在 App 内 WebView 完成，
+    // 跳到外部 Safari 会导致会话丢失、登录失败。
+    private func isAuthFlowURL(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        let authDomains = [
+            "chatgpt.com",
+            "openai.com",
+            "auth0.com",
+            "workos.com",
+            "accounts.google.com",
+            "appleid.apple.com",
+            "login.microsoftonline.com",
+            "account.live.com"
+        ]
+        return authDomains.contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         refreshControl.endRefreshing()
     }
@@ -56,6 +73,19 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         refreshControl.endRefreshing()
+
+        // 用户取消跳转等非真实错误不提示
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+            return
+        }
+
+        let alert = UIAlertController(title: "加载失败", message: "请检查网络连接后重试", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "重试", style: .default) { _ in
+            webView.reload()
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        present(alert, animated: true)
     }
 
     // 网页内导航放行；mailto/tel 等非 http(s) 链接交给系统
@@ -77,14 +107,20 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
         decisionHandler(.allow)
     }
 
-    // target=_blank 新窗口链接 → 系统 Safari 打开，不打断 App 内会话
+    // 新窗口链接：登录授权域名在 App 内继续，其余跳系统 Safari
     func webView(
         _ webView: WKWebView,
         createWebViewWith configuration: WKWebViewConfiguration,
         for navigationAction: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
-        if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
+        guard navigationAction.targetFrame == nil,
+              let url = navigationAction.request.url else {
+            return nil
+        }
+        if isAuthFlowURL(url) {
+            webView.load(URLRequest(url: url))
+        } else if url.scheme?.lowercased().hasPrefix("http") == true {
             UIApplication.shared.open(url)
         }
         return nil
@@ -99,6 +135,58 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
         decisionHandler: @escaping (WKPermissionDecision) -> Void
     ) {
         decisionHandler(.grant)
+    }
+
+    // 网页 alert() 弹窗，不实现会导致页面 JS 挂起卡死
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptAlertPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping () -> Void
+    ) {
+        let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "确定", style: .default) { _ in
+            completionHandler()
+        })
+        present(alert, animated: true)
+    }
+
+    // 网页 confirm() 弹窗
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptConfirmPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping (Bool) -> Void
+    ) {
+        let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "确定", style: .default) { _ in
+            completionHandler(true)
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in
+            completionHandler(false)
+        })
+        present(alert, animated: true)
+    }
+
+    // 网页 prompt() 输入框
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptTextInputPanelWithPrompt prompt: String,
+        defaultText: String?,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping (String?) -> Void
+    ) {
+        let alert = UIAlertController(title: nil, message: prompt, preferredStyle: .alert)
+        alert.addTextField { textField in
+            textField.text = defaultText
+        }
+        alert.addAction(UIAlertAction(title: "确定", style: .default) { _ in
+            completionHandler(alert.textFields?.first?.text)
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in
+            completionHandler(nil)
+        })
+        present(alert, animated: true)
     }
 
     // 状态栏颜色跟随系统深浅色
