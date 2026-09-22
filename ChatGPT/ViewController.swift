@@ -5,26 +5,19 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
 
     private var webView: WKWebView!
     private let refreshControl = UIRefreshControl()
-    private let homeURL = URL(string: "https://chatgpt.com")!
-
-    // 伪装成 iPhone Safari，通过 Cloudflare 检测
-    private let safariUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
+    private let placeholderView = UIView()
+    private var placeholderComposer: UIView?
+    private var pageReadyObserver: NSObjectProtocol?
+    private var hasPresentedWebContent = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
 
-        let config = WKWebViewConfiguration()
-        config.websiteDataStore = .default()              // 登录态持久化
-        config.allowsInlineMediaPlayback = true
-        config.allowsPictureInPictureMediaPlayback = true
-        config.mediaTypesRequiringUserActionForPlayback = []
-
-        webView = WKWebView(frame: .zero, configuration: config)
+        webView = WebViewStore.shared.webView
+        webView.removeFromSuperview()
         webView.navigationDelegate = self
         webView.uiDelegate = self
-        webView.customUserAgent = safariUA
-        webView.allowsBackForwardNavigationGestures = true   // 边缘侧滑返回
         webView.translatesAutoresizingMaskIntoConstraints = false
 
         view.addSubview(webView)
@@ -39,11 +32,139 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
         refreshControl.addTarget(self, action: #selector(reloadPage), for: .valueChanged)
         webView.scrollView.refreshControl = refreshControl
 
-        webView.load(URLRequest(url: homeURL))
+        configureLaunchPlaceholder()
+        observePageReadiness()
+        WebViewStore.shared.loadIfNeeded()
+
+        // The shared web view may already be ready by the time this controller
+        // attaches to it during a warm scene connection.
+        if webView.url != nil, !webView.isLoading {
+            hideLaunchPlaceholder(animated: false)
+        }
     }
 
     @objc private func reloadPage() {
-        webView.reload()
+        WebViewStore.shared.reloadOrLoadHome()
+    }
+
+    deinit {
+        if let pageReadyObserver {
+            NotificationCenter.default.removeObserver(pageReadyObserver)
+        }
+    }
+
+    private func configureLaunchPlaceholder() {
+        placeholderView.translatesAutoresizingMaskIntoConstraints = false
+        placeholderView.backgroundColor = .systemBackground
+        placeholderView.isUserInteractionEnabled = false
+        placeholderView.accessibilityLabel = "正在打开 ChatGPT"
+        view.addSubview(placeholderView)
+
+        let titleLabel = UILabel()
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.text = "ChatGPT"
+        titleLabel.textColor = .label
+        titleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
+        placeholderView.addSubview(titleLabel)
+
+        let markView = UIImageView(image: UIImage(systemName: "sparkles"))
+        markView.translatesAutoresizingMaskIntoConstraints = false
+        markView.tintColor = .label
+        markView.contentMode = .scaleAspectFit
+        placeholderView.addSubview(markView)
+
+        let composer = UIView()
+        composer.translatesAutoresizingMaskIntoConstraints = false
+        composer.backgroundColor = .secondarySystemBackground
+        composer.layer.cornerRadius = 27
+        composer.layer.borderWidth = 0.5
+        composer.layer.borderColor = UIColor.separator.cgColor
+        placeholderView.addSubview(composer)
+        placeholderComposer = composer
+
+        let promptLabel = UILabel()
+        promptLabel.translatesAutoresizingMaskIntoConstraints = false
+        promptLabel.text = "询问任何问题"
+        promptLabel.textColor = .placeholderText
+        promptLabel.font = .systemFont(ofSize: 16)
+        composer.addSubview(promptLabel)
+
+        let sendView = UIImageView(image: UIImage(systemName: "arrow.up.circle.fill"))
+        sendView.translatesAutoresizingMaskIntoConstraints = false
+        sendView.tintColor = .tertiaryLabel
+        sendView.contentMode = .scaleAspectFit
+        composer.addSubview(sendView)
+
+        NSLayoutConstraint.activate([
+            placeholderView.topAnchor.constraint(equalTo: view.topAnchor),
+            placeholderView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            placeholderView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            placeholderView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+
+            titleLabel.centerXAnchor.constraint(equalTo: placeholderView.centerXAnchor),
+            titleLabel.topAnchor.constraint(equalTo: placeholderView.safeAreaLayoutGuide.topAnchor, constant: 13),
+
+            markView.centerXAnchor.constraint(equalTo: placeholderView.centerXAnchor),
+            markView.centerYAnchor.constraint(equalTo: placeholderView.centerYAnchor, constant: -24),
+            markView.widthAnchor.constraint(equalToConstant: 32),
+            markView.heightAnchor.constraint(equalToConstant: 32),
+
+            composer.leadingAnchor.constraint(equalTo: placeholderView.leadingAnchor, constant: 14),
+            composer.trailingAnchor.constraint(equalTo: placeholderView.trailingAnchor, constant: -14),
+            composer.bottomAnchor.constraint(equalTo: placeholderView.safeAreaLayoutGuide.bottomAnchor, constant: -10),
+            composer.heightAnchor.constraint(equalToConstant: 54),
+
+            promptLabel.leadingAnchor.constraint(equalTo: composer.leadingAnchor, constant: 18),
+            promptLabel.centerYAnchor.constraint(equalTo: composer.centerYAnchor),
+
+            sendView.trailingAnchor.constraint(equalTo: composer.trailingAnchor, constant: -10),
+            sendView.centerYAnchor.constraint(equalTo: composer.centerYAnchor),
+            sendView.widthAnchor.constraint(equalToConstant: 32),
+            sendView.heightAnchor.constraint(equalToConstant: 32)
+        ])
+
+        UIView.animate(
+            withDuration: 0.9,
+            delay: 0,
+            options: [.autoreverse, .repeat, .allowUserInteraction]
+        ) {
+            composer.alpha = 0.62
+        }
+    }
+
+    private func observePageReadiness() {
+        pageReadyObserver = NotificationCenter.default.addObserver(
+            forName: .chatGPTPageReady,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.hideLaunchPlaceholder(animated: true)
+        }
+    }
+
+    private func showLaunchPlaceholder() {
+        guard !hasPresentedWebContent else { return }
+        placeholderView.isHidden = false
+        placeholderView.alpha = 1
+        view.bringSubviewToFront(placeholderView)
+    }
+
+    private func hideLaunchPlaceholder(animated: Bool) {
+        guard !hasPresentedWebContent else { return }
+        hasPresentedWebContent = true
+        placeholderComposer?.layer.removeAllAnimations()
+
+        let completion: (Bool) -> Void = { [weak self] _ in
+            self?.placeholderView.isHidden = true
+        }
+        if animated {
+            UIView.animate(withDuration: 0.22, animations: {
+                self.placeholderView.alpha = 0
+            }, completion: completion)
+        } else {
+            placeholderView.alpha = 0
+            completion(true)
+        }
     }
 
     // 登录授权流程涉及的域名，必须留在 App 内 WebView 完成，
@@ -65,10 +186,17 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         refreshControl.endRefreshing()
+        hideLaunchPlaceholder(animated: true)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         refreshControl.endRefreshing()
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        hasPresentedWebContent = false
+        showLaunchPlaceholder()
+        WebViewStore.shared.reloadOrLoadHome()
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
@@ -82,7 +210,7 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
 
         let alert = UIAlertController(title: "加载失败", message: "请检查网络连接后重试", preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "重试", style: .default) { _ in
-            webView.reload()
+            WebViewStore.shared.reloadOrLoadHome()
         })
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))
         present(alert, animated: true)
@@ -134,7 +262,10 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
         type: WKMediaCaptureType,
         decisionHandler: @escaping (WKPermissionDecision) -> Void
     ) {
-        decisionHandler(.grant)
+        let host = origin.host.lowercased()
+        let trusted = host == "chatgpt.com" || host.hasSuffix(".chatgpt.com") ||
+            host == "openai.com" || host.hasSuffix(".openai.com")
+        decisionHandler(trusted ? .grant : .prompt)
     }
 
     // 网页 alert() 弹窗，不实现会导致页面 JS 挂起卡死
@@ -198,6 +329,7 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
         super.traitCollectionDidChange(previousTraitCollection)
         if traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) {
             setNeedsStatusBarAppearanceUpdate()
+            WebViewStore.shared.applySystemTheme()
         }
     }
 }
